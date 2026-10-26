@@ -29,25 +29,21 @@ def test_the_exempt_languages_are_the_cyrillic_and_greek_ones_parakeet_knows():
     assert EXEMPT_LANGUAGES == {"ru", "uk", "bg", "el"}
 
 
-@pytest.mark.parametrize("language,auto,env,blocked", [
-    ("de", (), {}, True),
-    ("en", (), {"LANG": "ru_RU.UTF-8"}, True),           # a chosen language wins over the locale
-    ("ru", (), {}, False),
-    ("uk", (), {}, False),
-    ("el", (), {}, False),
-    (None, ("en", "de"), {"LANG": "ru_RU.UTF-8"}, True),  # so does the auto-detect list
-    (None, ("en", "ru"), {}, False),
-    (None, (), {"LANG": "de_CH.UTF-8"}, True),
-    (None, (), {"LANG": "bg_BG.UTF-8"}, False),
-    (None, (), {"LC_ALL": "ru_RU.UTF-8", "LANG": "de_CH.UTF-8"}, False),
-    (None, (), {"LC_MESSAGES": "el_GR", "LANG": "de_CH.UTF-8"}, False),
-    (None, (), {"LC_ALL": "", "LANG": "uk_UA@euro"}, False),  # an empty one doesn't count
-    (None, (), {}, True),
-    (None, (), {"LANG": "C"}, True),
-    ("", (), {"LANG": "POSIX"}, True),
+@pytest.mark.parametrize("language,auto,usual,blocked", [
+    ("de", (), {"de"}, True),
+    ("en", (), {"ru"}, True),                 # a chosen language wins over the usual ones
+    ("ru", (), {"de"}, False),
+    ("uk", (), set(), False),
+    ("el", (), set(), False),
+    (None, ("en", "de"), {"ru"}, True),       # so does auto-detect's list
+    (None, ("en", "ru"), {"de"}, False),
+    (None, (), {"de"}, True),                 # plain auto: the languages this person uses
+    (None, (), {"en", "ru"}, False),          # Russian picked at first run, English desktop
+    (None, (), {"bg"}, False),
+    ("", (), set(), True),
 ])
-def test_should_block(language, auto, env, blocked):
-    assert should_block(language, auto, env) is blocked
+def test_should_block(language, auto, usual, blocked):
+    assert should_block(language, auto, usual) is blocked
 
 
 def test_logit_mask_moves_the_pick_and_counts_it():

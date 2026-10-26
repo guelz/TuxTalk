@@ -302,13 +302,15 @@ def test_the_log_counts_the_steering_but_shows_no_text(caplog):
     assert "also" not in " ".join(logged)
 
 
-@pytest.mark.parametrize("language,auto_languages,lang_env,expected", [
-    (None, (), "de_CH.UTF-8", [True]),             # a Swiss desktop, auto-detect
-    ("ru", (), "de_CH.UTF-8", [False]),            # Russian chosen
-    (None, ("en", "ru"), "de_CH.UTF-8", [False]),  # Russian among auto-detect's languages
+@pytest.mark.parametrize("language,auto_languages,dictation_language,lang_env,expected", [
+    (None, (), "de", "de_CH.UTF-8", [True]),             # a Swiss desktop, auto-detect
+    ("ru", (), "de", "de_CH.UTF-8", [False]),            # Russian chosen
+    (None, ("en", "ru"), "de", "de_CH.UTF-8", [False]),  # Russian among auto-detect's languages
+    (None, (), "ru", "en_US.UTF-8", [False]),            # Russian picked at first run
+    (None, (), "en", "ru_RU.UTF-8", [False]),            # a Russian desktop
 ])
 def test_dictation_keeps_cyrillic_out_unless_it_could_be_wanted(
-        monkeypatch, language, auto_languages, lang_env, expected):
+        monkeypatch, language, auto_languages, dictation_language, lang_env, expected):
     from tuxtalk import app, parakeet_engine
 
     seen = []
@@ -324,7 +326,8 @@ def test_dictation_keeps_cyrillic_out_unless_it_could_be_wanted(
             return "Hello there."
     monkeypatch.setattr(app, "model", Model(), raising=False)  # set by main() normally
     monkeypatch.setattr(app, "_auto_languages", auto_languages)
-    for name in ("LC_ALL", "LC_MESSAGES"):
+    monkeypatch.setattr(app, "_dictation_language", dictation_language)
+    for name in ("LC_ALL", "LC_MESSAGES", "LANGUAGE"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("LANG", lang_env)
     app._transcribe_audio(np.zeros(16000, dtype=np.float32), language)

@@ -57,13 +57,16 @@ def _latin_only(model, on):
             logger.warning(f"Couldn't tell Parakeet to keep Cyrillic and Greek out: {e}")
 
 
-def prepare_parakeet(model, words, language, auto_languages):
+def prepare_parakeet(model, words, language, auto_languages, dictation_language):
     """Ready *model* for a dictation: Your Words, and Latin only unless the
     person could be dictating Cyrillic or Greek (the language chosen,
-    auto-detect's list of languages, else the desktop's locale)."""
+    auto-detect's list of languages, else *dictation_language*, the
+    first-run choice, and the desktop's language)."""
+    from .recommend import system_language
     from .script_filter import should_block
     _steer(model, words)
-    _latin_only(model, should_block(language, auto_languages, os.environ))
+    usual = {dictation_language, system_language()}
+    _latin_only(model, should_block(language, auto_languages, usual))
 
 
 class ParakeetGpuModel:

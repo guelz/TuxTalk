@@ -126,7 +126,7 @@ def test_it_applies_without_a_restart():
 
 def _prepare(monkeypatch, mode, raw="i have three cats and twenty five chickens"):
     monkeypatch.setattr(app, "_numbers_mode", mode)
-    monkeypatch.setattr(app, "_numbers_language", "en")
+    monkeypatch.setattr(app, "_dictation_language", "en")
     monkeypatch.setattr(app, "_custom_words", [])
     monkeypatch.setattr(app, "_remove_fillers", False)
     monkeypatch.setattr(app, "_ai_corrections", False)
@@ -149,14 +149,14 @@ def test_dictation_is_unchanged_when_off(monkeypatch):
 def test_settings_pick_the_mode_and_language(monkeypatch):
     # Put back whatever the other tests expect once this one is done.
     monkeypatch.setattr(app, "_numbers_mode", None)
-    monkeypatch.setattr(app, "_numbers_language", "en")
+    monkeypatch.setattr(app, "_dictation_language", "en")
     monkeypatch.setattr(app, "_ai_engine", None)
     cfg = config.Settings()
     cfg.numbers_as_digits = True
     cfg.dictation_language = "de"
     app._apply_cleanup_settings(cfg)
     assert app._numbers_mode == "all"
-    assert app._numbers_language == "de"
+    assert app._dictation_language == "de"
     cfg.numbers_small_as_words = True
     app._apply_cleanup_settings(cfg)
     assert app._numbers_mode == "small_as_words"

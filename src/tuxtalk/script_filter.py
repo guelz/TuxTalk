@@ -34,29 +34,18 @@ def non_latin_ids(vocab) -> list[int]:
     return sorted(i for i, text in vocab.items() if NON_LATIN.search(text))
 
 
-def should_block(language, auto_languages, environ) -> bool:
-    """Whether to keep Cyrillic and Greek out, given the language chosen
-    (None or "" for auto-detect), auto-detect's list of languages and the
-    environment. Not when the person could be dictating one of
-    EXEMPT_LANGUAGES: the chosen language, else every language on the list,
-    else the desktop's own language from the locale."""
+def should_block(language, auto_languages, usual_languages) -> bool:
+    """Whether to keep Cyrillic and Greek out. Not when the person could be
+    dictating one of EXEMPT_LANGUAGES: the language chosen (None or "" for
+    auto-detect), else every language on auto-detect's list, else the
+    languages they usually use (the first-run choice and the desktop's)."""
     if language:
         possible = {language}
     elif auto_languages:
         possible = set(auto_languages)
     else:
-        possible = {_locale_language(environ)}
+        possible = set(usual_languages)
     return not possible & EXEMPT_LANGUAGES
-
-
-def _locale_language(environ) -> str:
-    """The language code of the locale in *environ* ("de" for de_CH.UTF-8),
-    looked up the way programs do: LC_ALL, then LC_MESSAGES, then LANG."""
-    for name in ("LC_ALL", "LC_MESSAGES", "LANG"):
-        value = environ.get(name, "")
-        if value:
-            return re.split(r"[_.@]", value, maxsplit=1)[0].lower()
-    return ""
 
 
 class LogitMask:

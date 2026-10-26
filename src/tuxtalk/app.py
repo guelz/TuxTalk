@@ -104,10 +104,10 @@ def _loggable(text):
 # _apply_cleanup_settings(), at startup and on every live-settings reload.
 _remove_fillers = False
 _swiss_spelling = False     # ß -> ss in the finished text (Swiss Standard German)
-# Spoken numbers as digits: None (off), "all" or "small_as_words" (one to nine
-# stay words), and the language to read them in. See spoken_numbers.py.
+# Spoken numbers as digits: None (off), "all" or "small_as_words" (one to nine stay
+# words), and the dictation language that reads them (also used by script_filter.py).
 _numbers_mode = None
-_numbers_language = "en"
+_dictation_language = "en"
 # Select and move by voice (TuxTalk Labs, voice_navigation.py).
 _voice_navigation = False
 # Plain text in terminals and code editors (app_kind, plain_for_app).
@@ -141,7 +141,7 @@ def _apply_cleanup_settings(cfg):
     """Bring the cleanup and auto-stop options in line with *cfg*; start or
     stop the AI engine."""
     global _remove_fillers, _ai_engine, _auto_stop_seconds, _ai_corrections, _voice_editing, _swiss_spelling
-    global _numbers_mode, _numbers_language, _voice_navigation, _adapt_to_app, _auto_languages
+    global _numbers_mode, _dictation_language, _voice_navigation, _adapt_to_app, _auto_languages
     global _press_enter_after, _press_enter_delay, _hold_key_name
     global _chunk_pause_seconds, _chunk_cfg, _chunk_speech_db, _chunk_context_marks
     _auto_stop_seconds = (float(getattr(cfg, "auto_stop_seconds", 2.0))
@@ -173,7 +173,7 @@ def _apply_cleanup_settings(cfg):
     else:
         _numbers_mode = None
     from .recommend import effective_language
-    _numbers_language = effective_language(cfg)
+    _dictation_language = effective_language(cfg)
     _ai_corrections = bool(getattr(cfg, "ai_corrections", False))
     _voice_editing = bool(getattr(cfg, "voice_editing", False))
     want_ai = _ai_corrections or _voice_editing
@@ -2662,7 +2662,7 @@ def _transcribe_audio(audio_f32, language: str | None) -> str | None:
     words_prompt = custom_words.prompt(_custom_words)
     # Auto-detect held to the user's languages: one language is simply used,
     # two or more are checked against Whisper's own pick (language_limit.py).
-    # Parakeet below has no language setting, so this changes nothing there.
+    # Parakeet below has no language setting; it only checks for Cyrillic/Greek.
     if not language:
         language = language_limit.forced_language(_auto_languages)
     limit_to = () if language else _auto_languages
@@ -2699,7 +2699,7 @@ def _transcribe_audio(audio_f32, language: str | None) -> str | None:
         # talking counts as no speech, and a filler alone is dropped.
         # Your Words and Latin only steer Parakeet's decoder (prepare_parakeet).
         from .parakeet_gpu import prepare_parakeet
-        prepare_parakeet(engine, _custom_words, language, _auto_languages)
+        prepare_parakeet(engine, _custom_words, language, _auto_languages, _dictation_language)
         raw = engine.recognize(audio_f32)
         where = " on GPU" if isinstance(engine, ParakeetGpuModel) else ""
         logger.info(f"TIMING: Transcription completed in {time.time() - transcribe_start:.2f}s (Parakeet{where})")
@@ -2923,7 +2923,7 @@ def _numbers_to_digits(text: str) -> str:
     if not _numbers_mode:
         return text
     from .spoken_numbers import to_digits
-    return to_digits(text, _numbers_language, small_as_words=_numbers_mode == "small_as_words")
+    return to_digits(text, _dictation_language, small_as_words=_numbers_mode == "small_as_words")
 
 
 def _prepare_text(raw: str, smart_quotes: bool, auto_period: bool, auto_space: bool,
