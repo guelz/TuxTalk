@@ -23,8 +23,9 @@ rm -rf "$WORK" && mkdir -p "$WORK" && cd "$WORK"
 git clone -q --depth 1 --branch "v${WHISPER_CPP_VERSION}" https://github.com/ggml-org/whisper.cpp
 cd whisper.cpp
 # TuxTalk's own changes (vulkan-engine-patches/): Your Words for Parakeet's
-# greedy decoder (parakeet_set_word_boost). A patch that doesn't apply
-# stops the build rather than ship an engine without it.
+# greedy decoder (parakeet_set_word_boost) and Latin only, which keeps
+# Cyrillic and Greek pieces out of it (parakeet_set_blocked_tokens). A patch
+# that doesn't apply stops the build rather than ship an engine without it.
 for patch in /build/vulkan-engine-patches/*.patch; do
     [ -e "$patch" ] || continue
     git apply "$patch" || { echo "❌ $(basename "$patch") does not apply to whisper.cpp v${WHISPER_CPP_VERSION}"; exit 1; }

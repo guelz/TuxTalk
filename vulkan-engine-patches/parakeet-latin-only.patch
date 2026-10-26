@@ -1,0 +1,102 @@
+diff --git a/include/parakeet.h b/include/parakeet.h
+index c10442d..b381546 100644
+--- a/include/parakeet.h
++++ b/include/parakeet.h
+@@ -288,6 +288,19 @@ extern "C" {
+                             const float * samples,
+                                     int   n_samples);
+ 
++    // TuxTalk: word pieces the greedy decoder may never write, such as the
++    // Cyrillic and Greek ones for someone who dictates neither. Their logits
++    // are set to -inf on every decoder step. n_tokens = 0 turns it off.
++    // Returns n_tokens, or -1 if an id is not a piece (the blank never is).
++    PARAKEET_API int parakeet_set_blocked_tokens(
++            struct parakeet_context * ctx,
++                              int   n_tokens,
++                        const int * tokens);
++
++    // TuxTalk: decoder steps in the last parakeet_full where a blocked piece
++    // was the favourite, word-boost tries included.
++    PARAKEET_API int parakeet_blocked_hits(struct parakeet_context * ctx);
++
+     // Process a single chunk of audio data that fits within the model's audio context window.
+     // This is more efficient than parakeet_full() for short audio clips.
+     PARAKEET_API int parakeet_chunk(
+diff --git a/src/parakeet.cpp b/src/parakeet.cpp
+index ed66382..00c273b 100644
+--- a/src/parakeet.cpp
++++ b/src/parakeet.cpp
+@@ -458,6 +458,11 @@ struct parakeet_state {
+     int32_t sched_encode_n_audio_ctx = 0;
+ 
+     parakeet_lstm_state lstm_state;
++
++    // TuxTalk: pieces the decoder may never write (blocked[id] != 0; empty =
++    // none), and how often one was the favourite (parakeet_set_blocked_tokens).
++    std::vector<uint8_t> blocked;
++    int blocked_hits = 0;
+ };
+ 
+ // FFT cache for mel spectrogram computation
+@@ -2403,6 +2408,27 @@ static bool parakeet_joint(
+         ggml_backend_tensor_get(logits, logits_out.data() + (n_logits*i), sizeof(float)*(n_logits*i), sizeof(float)*n_logits);
+     }
+ 
++    // TuxTalk: keep blocked pieces out before anything picks from the
++    // logits, so the greedy pick and word boosting only see allowed pieces.
++    if (!pstate.blocked.empty()) {
++        const int n_pieces = hparams.n_vocab;
++        for (int i = 0; i < n_tokens; i++) {
++            if (batch.logits[i] == 0) {
++                continue;
++            }
++            float * row = logits_out.data() + (n_logits*i);
++            const int best = (int) (std::max_element(row, row + n_pieces + 1) - row);
++            if (best < n_pieces && pstate.blocked[best]) {
++                pstate.blocked_hits++;
++            }
++            for (int id = 0; id < n_pieces; id++) {
++                if (pstate.blocked[id]) {
++                    row[id] = -INFINITY;
++                }
++            }
++        }
++    }
++
+     if (batch.n_tokens == 1) {
+         pstate.t_decode_us += ggml_time_us() - t_start_us;
+         pstate.n_decode++;
+@@ -3582,6 +3608,7 @@ int parakeet_full_with_state(
+                     const float * samples,
+                            int    n_samples) {
+     state->result_all.clear();
++    state->blocked_hits = 0;
+ 
+     if (params.no_context) {
+         parakeet_reset_state(state);
+@@ -3687,6 +3714,25 @@ int parakeet_full(
+     return parakeet_full_with_state(ctx, ctx->state, params, samples, n_samples);
+ }
+ 
++int parakeet_set_blocked_tokens(struct parakeet_context * ctx, int n_tokens, const int * tokens) {
++    const int n_pieces = ctx->vocab.n_vocab;
++    for (int i = 0; i < n_tokens; i++) {
++        if (tokens[i] < 0 || tokens[i] >= n_pieces) {
++            return -1;
++        }
++    }
++    auto & blocked = ctx->state->blocked;
++    blocked.assign(n_tokens > 0 ? n_pieces : 0, 0);
++    for (int i = 0; i < n_tokens; i++) {
++        blocked[tokens[i]] = 1;
++    }
++    return n_tokens;
++}
++
++int parakeet_blocked_hits(struct parakeet_context * ctx) {
++    return ctx->state->blocked_hits;
++}
++
+ int parakeet_chunk(
+         struct parakeet_context * ctx,
+           struct parakeet_state * state,
