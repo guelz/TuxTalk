@@ -2697,9 +2697,9 @@ def _transcribe_audio(audio_f32, language: str | None) -> str | None:
         # invent a word in silence: an F9 tap with nothing said typed
         # "Mm-hmm." So, as for the Vulkan engine, a recording with nobody
         # talking counts as no speech, and a filler alone is dropped.
-        # Your Words steer Parakeet's decoder (parakeet_bias.py).
-        from .parakeet_gpu import _steer
-        _steer(engine, _custom_words)
+        # Your Words and Latin only steer Parakeet's decoder (prepare_parakeet).
+        from .parakeet_gpu import prepare_parakeet
+        prepare_parakeet(engine, _custom_words, language, _auto_languages)
         raw = engine.recognize(audio_f32)
         where = " on GPU" if isinstance(engine, ParakeetGpuModel) else ""
         logger.info(f"TIMING: Transcription completed in {time.time() - transcribe_start:.2f}s (Parakeet{where})")

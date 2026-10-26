@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -299,3 +300,32 @@ def test_the_log_counts_the_steering_but_shows_no_text(caplog):
     logged = [r.message for r in caplog.records if "steered" in r.message]
     assert logged == ["Parakeet: steered 1 steps away from Cyrillic/Greek"]
     assert "also" not in " ".join(logged)
+
+
+@pytest.mark.parametrize("language,auto_languages,lang_env,expected", [
+    (None, (), "de_CH.UTF-8", [True]),             # a Swiss desktop, auto-detect
+    ("ru", (), "de_CH.UTF-8", [False]),            # Russian chosen
+    (None, ("en", "ru"), "de_CH.UTF-8", [False]),  # Russian among auto-detect's languages
+])
+def test_dictation_keeps_cyrillic_out_unless_it_could_be_wanted(
+        monkeypatch, language, auto_languages, lang_env, expected):
+    from tuxtalk import app, parakeet_engine
+
+    seen = []
+
+    class Model(parakeet_engine.ParakeetModel):
+        def __init__(self):
+            pass
+
+        def set_latin_only(self, on):
+            seen.append(on)
+
+        def recognize(self, audio):
+            return "Hello there."
+    monkeypatch.setattr(app, "model", Model(), raising=False)  # set by main() normally
+    monkeypatch.setattr(app, "_auto_languages", auto_languages)
+    for name in ("LC_ALL", "LC_MESSAGES"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LANG", lang_env)
+    app._transcribe_audio(np.zeros(16000, dtype=np.float32), language)
+    assert seen == expected
