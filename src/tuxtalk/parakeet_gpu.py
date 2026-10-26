@@ -28,7 +28,7 @@ import numpy as np
 
 from . import engine_process
 from .logger import setup_logger
-from .parakeet_engine import PARAKEET_MODEL, load_parakeet_model
+from .parakeet_engine import PARAKEET_MODEL, load_parakeet_model, log_steering
 
 logger = setup_logger(__name__)
 
@@ -45,6 +45,16 @@ def _steer(model, words):
             set_words(words)
         except Exception as e:
             logger.warning(f"Couldn't hand Parakeet your words: {e}")
+
+
+def _latin_only(model, on):
+    """Turn Latin only on or off in *model* if it can; never in the way of a dictation."""
+    set_latin_only = getattr(model, "set_latin_only", None)
+    if set_latin_only is not None:
+        try:
+            set_latin_only(on)
+        except Exception as e:
+            logger.warning(f"Couldn't tell Parakeet to keep Cyrillic and Greek out: {e}")
 
 
 class ParakeetGpuModel:
@@ -68,6 +78,8 @@ class ParakeetGpuModel:
         self._cpu = None
         self._words = ()
         self._sent_words = ()       # the list the running helper has (a new one has none)
+        self._latin_only = False
+        self._sent_latin_only = False   # what the running helper has (a new one blocks nothing)
         self._lock = threading.Lock()
         # The helper dies with the thread that started it (PR_SET_PDEATHSIG
         # is per thread), and a restart can happen on a short-lived dictation
@@ -99,6 +111,7 @@ class ParakeetGpuModel:
             self._stop()
             raise RuntimeError(reply.get("error") or "the helper did not start")
         self._sent_words = ()
+        self._sent_latin_only = False
         logger.info("Parakeet graphics helper ready")
 
     def _engine_messages(self):
@@ -153,17 +166,36 @@ class ParakeetGpuModel:
             logger.info(f"Your Words for Parakeet on the graphics chip: {reply['words']} spellings "
                         f"of {len(self._words)} words")
 
+    def _send_latin_only(self):
+        """Tell the helper Latin only is on or off when that changed since it
+        last heard. A problem here costs only the blocking, never the dictation."""
+        if self._sent_latin_only == self._latin_only:
+            return
+        from .parakeet_gpu_worker import encode_latin_only
+        self._proc.stdin.write(encode_latin_only(self._latin_only))
+        self._proc.stdin.flush()
+        reply = self._read_reply(30)
+        self._sent_latin_only = self._latin_only
+        if "error" in reply:
+            logger.warning(f"Parakeet on the graphics chip can't block Cyrillic/Greek: "
+                           f"{reply['error']}")
+        elif reply.get("blocked") is None:
+            logger.info("This Vulkan engine can't block Cyrillic/Greek; update the engine")
+
     def _recognize_on_gpu(self, audio):
         """Send one recording to the helper (restarting it if it died) and return its text."""
         if self._proc is None or self._proc.poll() is not None:
             logger.warning("Parakeet graphics helper had stopped; starting it again")
             self._start()
         self._send_words()
+        self._send_latin_only()
         self._proc.stdin.write(struct.pack("<I", len(audio)) + audio.tobytes())
         self._proc.stdin.flush()
         reply = self._read_reply(60 + len(audio) / SAMPLE_RATE)
         if "error" in reply:
             raise RuntimeError(reply["error"])
+        if reply.get("blocked_hits"):
+            log_steering(reply["blocked_hits"])
         return reply.get("text", "").strip()
 
     # --- what the dictation service calls ------------------------------------
@@ -191,6 +223,7 @@ class ParakeetGpuModel:
                                    f"version isn't available ({e})") from e
             logger.warning("Parakeet moved to the processor for the rest of this session")
             _steer(self._cpu, self._words)
+            _latin_only(self._cpu, self._latin_only)
             return self._cpu.recognize(audio)
 
     def set_words(self, words) -> None:
@@ -200,6 +233,14 @@ class ParakeetGpuModel:
         self._words = tuple(words or ())
         if self._cpu is not None:
             _steer(self._cpu, self._words)
+
+    def set_latin_only(self, on) -> None:
+        """Latin only (script_filter.py): sent to the helper before the next
+        recording, and handed to the processor engine if this has fallen
+        back to it."""
+        self._latin_only = bool(on)
+        if self._cpu is not None:
+            _latin_only(self._cpu, self._latin_only)
 
     def close(self):
         """Stop the helper for good."""

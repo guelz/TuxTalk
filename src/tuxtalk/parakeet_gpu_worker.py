@@ -19,6 +19,12 @@ Protocol, over stdin and stdout:
                      list of Your Words (parakeet_bias.py)
   helper -> service: {"words": number of spellings}, or {"words": null} when
                      the engine predates TuxTalk's word-boost patch
+  service -> helper: BLOCK_REQUEST as the count, a 4-byte length and JSON
+                     true or false: Latin only on or off (script_filter.py)
+  helper -> service: {"blocked": number of pieces blocked}, or
+                     {"blocked": null} when the engine predates TuxTalk's
+                     latin-only patch; from an engine that has it, each
+                     {"text": ...} also carries "blocked_hits"
 Once the model is loaded and warmed up the helper sends {"ready": true}, or
 {"error": ...} if it couldn't load.
 """
@@ -30,6 +36,7 @@ import sys
 
 SAMPLE_RATE = 16000
 WORDS_REQUEST = 0xFFFFFFFF        # in the count's place: a word list follows
+BLOCK_REQUEST = 0xFFFFFFFE        # in the count's place: Latin only on or off follows
 WARM_UP_SECONDS = (1, 30, 90)     # silence, covering short, long and very long dictations
 
 
@@ -46,6 +53,12 @@ def encode_words(words) -> bytes:
     return struct.pack("<II", WORDS_REQUEST, len(data)) + data
 
 
+def encode_latin_only(on) -> bytes:
+    """A request that turns Latin only on or off."""
+    data = json.dumps(bool(on)).encode()
+    return struct.pack("<II", BLOCK_REQUEST, len(data)) + data
+
+
 def _read_exact(stream, n):
     """Exactly *n* bytes from *stream*, or None if it ends first."""
     data = b""
@@ -59,17 +72,21 @@ def _read_exact(stream, n):
 
 def read_request(stream):
     """The raw float32 bytes of the next request, a list for a word list,
-    or None when the service has closed the pipe."""
+    {"latin_only": bool} for Latin only, or None when the service has closed
+    the pipe."""
     head = _read_exact(stream, 4)
     if head is None:
         return None
     (count,) = struct.unpack("<I", head)
-    if count == WORDS_REQUEST:
+    if count in (WORDS_REQUEST, BLOCK_REQUEST):
         size = _read_exact(stream, 4)
         if size is None:
             return None
         data = _read_exact(stream, struct.unpack("<I", size)[0])
-        return None if data is None else json.loads(data.decode())
+        if data is None:
+            return None
+        value = json.loads(data.decode())
+        return value if count == WORDS_REQUEST else {"latin_only": bool(value)}
     return _read_exact(stream, count * 4) if count else b""
 
 
@@ -100,24 +117,56 @@ class _FullParams(C.Structure):
 
 
 class Engine:
-    """The loaded model: transcribe(raw float32 bytes) -> text, and
-    set_words(words) -> number of spellings, or None without the patch."""
+    """The loaded model: transcribe(raw float32 bytes) -> text;
+    set_words(words) -> number of spellings; set_latin_only(on) -> number of
+    pieces blocked; blocked_hits() -> steps steered in the last recording.
+    The last three return None from an engine without TuxTalk's patch."""
 
-    def __init__(self, transcribe, set_words):
+    def __init__(self, transcribe, set_words, set_latin_only, blocked_hits):
         self.transcribe = transcribe
         self.set_words = set_words
+        self.set_latin_only = set_latin_only
+        self.blocked_hits = blocked_hits
+
+
+def _engine_vocab(lib, ctx):
+    """The engine's word pieces, id -> text, without the blank (which comes
+    right after them)."""
+    lib.parakeet_n_vocab.argtypes = [C.c_void_p]
+    lib.parakeet_token_to_str.restype = C.c_char_p
+    lib.parakeet_token_to_str.argtypes = [C.c_void_p, C.c_int]
+    return {i: (lib.parakeet_token_to_str(ctx, i) or b"").decode("utf-8", "replace")
+            for i in range(lib.parakeet_n_vocab(ctx))}
 
 
 def _word_booster(lib, ctx, words):
     """parakeet_bias's spellings of *words* in this engine's vocabulary."""
     from .parakeet_bias import WordBooster
-    lib.parakeet_n_vocab.argtypes = [C.c_void_p]
-    lib.parakeet_token_to_str.restype = C.c_char_p
-    lib.parakeet_token_to_str.argtypes = [C.c_void_p, C.c_int]
-    n_vocab = lib.parakeet_n_vocab(ctx)
-    vocab = {i: (lib.parakeet_token_to_str(ctx, i) or b"").decode("utf-8", "replace")
-             for i in range(n_vocab)}
-    return WordBooster(vocab, words, n_vocab)    # the blank comes right after the pieces
+    vocab = _engine_vocab(lib, ctx)
+    return WordBooster(vocab, words, len(vocab))    # the blank comes right after the pieces
+
+
+def _latin_only_calls(lib, ctx):
+    """set_latin_only(on) and blocked_hits() for this engine (see Engine), on
+    the latin-only patch's parakeet_set_blocked_tokens and
+    parakeet_blocked_hits."""
+    try:
+        setter, hits = lib.parakeet_set_blocked_tokens, lib.parakeet_blocked_hits
+    except AttributeError:
+        return (lambda on: None), (lambda: None)    # an engine without the patch
+    setter.restype = C.c_int
+    setter.argtypes = [C.c_void_p, C.c_int, C.POINTER(C.c_int)]
+    hits.restype = C.c_int
+    hits.argtypes = [C.c_void_p]
+
+    def set_latin_only(on):
+        from .script_filter import non_latin_ids
+        ids = non_latin_ids(_engine_vocab(lib, ctx)) if on else []
+        if setter(ctx, len(ids), (C.c_int * max(1, len(ids)))(*ids)) < 0:
+            raise RuntimeError("the engine refused the pieces to block")
+        return len(ids)
+
+    return set_latin_only, (lambda: hits(ctx))
 
 
 def load_engine(engine_dir, model, device, threads):
@@ -179,7 +228,17 @@ def load_engine(engine_dir, model, device, threads):
             raise RuntimeError("the engine refused the word tables")
         return n
 
-    return Engine(transcribe, set_words)
+    return Engine(transcribe, set_words, *_latin_only_calls(lib, ctx))
+
+
+def _transcription(engine, raw):
+    """The reply to a recording: its text, and from an engine with the
+    latin-only patch how often it steered away from Cyrillic or Greek."""
+    reply = {"text": engine.transcribe(raw)}
+    hits = engine.blocked_hits()
+    if hits is not None:
+        reply["blocked_hits"] = hits
+    return reply
 
 
 def main(argv):
@@ -208,8 +267,10 @@ def main(argv):
         try:
             if isinstance(raw, list):
                 write_reply(out, {"words": engine.set_words(raw)})
+            elif isinstance(raw, dict):
+                write_reply(out, {"blocked": engine.set_latin_only(raw["latin_only"])})
             else:
-                write_reply(out, {"text": transcribe(raw)})
+                write_reply(out, _transcription(engine, raw))
         except Exception as e:
             write_reply(out, {"error": str(e)})
     return 0

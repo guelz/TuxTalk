@@ -21,6 +21,9 @@ from tuxtalk import parakeet_gpu_worker as worker
 #   die     becomes ready, then exits on the first request
 #   once    answers the first request, then exits
 #   silent  never answers at all
+#   old     an engine without TuxTalk's patches (no words, no blocking)
+# With Latin only on, each answer reports one blocked step, as a real engine
+# would where it steered away from a Cyrillic piece.
 FAKE_WORKER = textwrap.dedent("""
     import json, struct, sys
     mode = sys.argv[1]
@@ -33,6 +36,7 @@ FAKE_WORKER = textwrap.dedent("""
         reply({"error": "no graphics chip"}); sys.exit(1)
     reply({"ready": True})
     answered = 0
+    latin_only = False
     while True:
         head = inp.read(4)
         if len(head) < 4:
@@ -43,10 +47,18 @@ FAKE_WORKER = textwrap.dedent("""
             words = json.loads(inp.read(size))
             reply({"words": None if mode == "old" else len(words)})
             continue
+        if n == 0xFFFFFFFE:                       # Latin only (BLOCK_REQUEST)
+            size = struct.unpack("<I", inp.read(4))[0]
+            latin_only = json.loads(inp.read(size))
+            reply({"blocked": None if mode == "old" else (3 if latin_only else 0)})
+            continue
         inp.read(n * 4)
         if mode == "die" or (mode == "once" and answered):
             sys.exit(3)
-        reply({"text": f" {n} samples "})
+        answer = {"text": f" {n} samples "}
+        if mode != "old":
+            answer["blocked_hits"] = 1 if latin_only else 0
+        reply(answer)
         answered += 1
 """)
 
@@ -212,4 +224,101 @@ def test_worker_reads_a_word_list_between_recordings():
                         + worker.encode_request(np.zeros(3, dtype=np.float32)))
     assert worker.read_request(stream) == ["TuxTalk", "Ärger"]
     assert len(worker.read_request(stream)) == 12
+    assert worker.read_request(stream) is None
+
+
+# --- Latin only on the graphics chip (script_filter.py) --------------------------
+
+@pytest.fixture
+def latin_requests(monkeypatch):
+    """Every Latin-only request the service sends, in order."""
+    sent = []
+    real = worker.encode_latin_only
+    monkeypatch.setattr(worker, "encode_latin_only", lambda on: sent.append(on) or real(on))
+    return sent
+
+
+def test_latin_only_reaches_the_helper_once_per_change(fake, latin_requests):
+    model = parakeet_gpu.ParakeetGpuModel(0, command=fake("ok"))
+    try:
+        model.recognize(_audio())                   # off, as a new helper is: nothing sent
+        model.set_latin_only(True)
+        model.recognize(_audio())
+        model.set_latin_only(True)
+        model.recognize(_audio())
+        model.set_latin_only(False)
+        model.recognize(_audio())
+        assert latin_requests == [True, False]
+    finally:
+        model.close()
+
+
+def test_a_restarted_helper_is_told_latin_only_again(fake, latin_requests):
+    model = parakeet_gpu.ParakeetGpuModel(0, command=fake("once"))
+    try:
+        model.set_latin_only(True)
+        assert model.recognize(_audio()) == "16000 samples"
+        # The helper exits on its second recording; the new one starts
+        # without blocking and has to be told again.
+        assert model.recognize(_audio(2)) == "32000 samples"
+        assert latin_requests == [True, True]
+    finally:
+        model.close()
+
+
+def test_an_engine_without_the_block_patch_still_transcribes(fake, caplog):
+    import logging
+    caplog.set_level(logging.INFO, logger="tuxtalk.parakeet_gpu")
+    model = parakeet_gpu.ParakeetGpuModel(0, command=fake("old"))
+    try:
+        model.set_latin_only(True)
+        assert model.recognize(_audio()) == "16000 samples"
+        assert model.recognize(_audio()) == "16000 samples"
+        told = [r.message for r in caplog.records if "can't block" in r.message]
+        assert told == ["This Vulkan engine can't block Cyrillic/Greek; update the engine"]
+    finally:
+        model.close()
+
+
+def test_the_processor_fallback_keeps_latin_only(fake, monkeypatch):
+    got = []
+
+    class Cpu:
+        def set_latin_only(self, on):
+            got.append(on)
+
+        def recognize(self, audio):
+            return "from the processor"
+
+    monkeypatch.setattr(parakeet_gpu, "load_parakeet_model", lambda: Cpu())
+    model = parakeet_gpu.ParakeetGpuModel(0, command=fake("die"))
+    try:
+        model.set_latin_only(True)
+        assert model.recognize(_audio()) == "from the processor"
+        model.set_latin_only(False)
+        assert got == [True, False]
+    finally:
+        model.close()
+
+
+def test_steering_on_the_graphics_chip_is_logged_as_a_count(fake, caplog):
+    import logging
+    caplog.set_level(logging.INFO, logger="tuxtalk.parakeet_engine")
+    model = parakeet_gpu.ParakeetGpuModel(0, command=fake("ok"))
+    try:
+        model.set_latin_only(True)
+        model.recognize(_audio())
+        steered = [r.message for r in caplog.records if "steered" in r.message]
+        assert steered == ["Parakeet: steered 1 steps away from Cyrillic/Greek"]
+    finally:
+        model.close()
+
+
+def test_worker_reads_a_latin_only_request_between_recordings():
+    stream = io.BytesIO(worker.encode_latin_only(True)
+                        + worker.encode_request(np.zeros(3, dtype=np.float32))
+                        + worker.encode_latin_only(False))
+    assert worker.read_request(stream) == {"latin_only": True}
+    assert len(worker.read_request(stream)) == 12
+    assert worker.read_request(stream) == {"latin_only": False}
     assert worker.read_request(stream) is None
