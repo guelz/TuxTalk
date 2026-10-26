@@ -480,8 +480,8 @@ def model_setting_warning(model, device, language_mode, language, language_name=
         notes.append(f"Parakeet doesn't understand {lang}. It knows English and 24 European "
                      f"languages. For {lang}, choose one of the Whisper models.")
     if language_mode == "auto" and auto_languages:
-        notes.append("\u201cSeveral languages\u201d does nothing with Parakeet, which always "
-                     "picks the language by itself. It only works with the Whisper models.")
+        notes.append("Parakeet picks the language by itself. Here \u201cSeveral languages\u201d "
+                     "only allows Cyrillic and Greek letters when a language using them is on it.")
     return "\n".join(notes)
 
 

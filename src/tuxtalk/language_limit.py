@@ -13,8 +13,8 @@ when its first choice is off the list is it run again, told to use the most
 likely language that is on it.
 
 Parakeet has no language setting at all (it decides internally, among its 25
-languages), so the list applies to the Whisper models only. Preferences says
-so next to the list.
+languages); for it the list only decides whether Cyrillic and Greek letters
+may appear (script_filter.py). Preferences says so next to the list.
 
 The setting is stored as text, "en,es", like every other setting in
 config.toml; "" means any language.

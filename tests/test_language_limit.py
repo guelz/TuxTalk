@@ -193,10 +193,13 @@ def test_the_service_passes_the_list_to_the_graphics_engine(words_off, monkeypat
 
 # --- Preferences ----------------------------------------------------------------------
 
-def test_parakeet_says_it_does_not_use_the_list():
+def test_parakeet_says_what_the_list_does_for_it():
+    """Parakeet picks the language by itself; the list only decides whether
+    Cyrillic and Greek letters may appear (script_filter.py)."""
     from tuxtalk.prefs import model_setting_warning
     note = model_setting_warning("parakeet-v3", "vulkan", "auto", "", auto_languages=("en", "es"))
-    assert "does nothing with Parakeet" in note
+    assert "picks the language by itself" in note
+    assert "Cyrillic and Greek" in note
     assert model_setting_warning("parakeet-v3", "vulkan", "auto", "") == ""
     assert model_setting_warning("small", "vulkan", "auto", "", auto_languages=("en", "es")) == ""
     # Manual mode names one language, so the list doesn't apply at all.
