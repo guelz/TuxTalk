@@ -125,7 +125,41 @@ class ParakeetModel:
 
     def recognize(self, audio_f32) -> str:
         """Transcribe 16 kHz mono float32 audio and return the text."""
-        return (self._model.recognize(audio_f32, sample_rate=16000) or "").strip()
+        mask = getattr(self, "_mask", None)
+        if mask is not None:
+            mask.reset()
+        text = (self._model.recognize(audio_f32, sample_rate=16000) or "").strip()
+        if mask is not None and mask.hits:
+            log_steering(mask.hits)
+        return text
+
+    def set_latin_only(self, on) -> None:
+        """Keep Cyrillic and Greek out of what Parakeet writes, or let them
+        back in (script_filter.py). Cheap to call before every dictation, and
+        it works under Your Words too: both onnx-asr's decoder and
+        parakeet_bias's call asr._decode, which this wraps. Anything
+        unexpected inside onnx-asr leaves the decoder as it was."""
+        on = bool(on)
+        if on == getattr(self, "_latin_only", False):
+            return
+        self._latin_only = on
+        self._mask = None
+        asr = getattr(self._model, "asr", None)
+        if asr is None:
+            return
+        vars(asr).pop("_decode", None)          # onnx-asr's own _decode again
+        if not on:
+            logger.info("Parakeet: Cyrillic and Greek letters allowed")
+            return
+        try:
+            from .script_filter import LogitMask, non_latin_ids
+            mask = LogitMask(non_latin_ids(asr._vocab))
+            asr._decode = _masked_decode(asr._decode, mask)
+        except Exception as e:
+            logger.warning(f"Parakeet can't keep Cyrillic and Greek letters out: {e}")
+            return
+        self._mask = mask
+        logger.info(f"Parakeet: Cyrillic and Greek letters blocked ({len(mask.ids)} pieces)")
 
     def set_words(self, words) -> None:
         """Lean toward Your Words (parakeet_bias.py). Cheap to call before
@@ -154,6 +188,20 @@ class ParakeetModel:
         except Exception as e:
             asr._decoding = plain
             logger.warning(f"Your Words can't steer Parakeet, so only the spelling pass applies: {e}")
+
+
+def _masked_decode(decode, mask):
+    """onnx-asr's *decode* with *mask* applied to the piece scores it returns."""
+    def masked(tokens, state, encoder_out):
+        logits, step, new_state = decode(tokens, state, encoder_out)
+        return mask.apply(logits), step, new_state
+    return masked
+
+
+def log_steering(hits):
+    """Log how often blocking Cyrillic and Greek changed a pick, never the
+    text: so the log shows whether it helps without keeping what was said."""
+    logger.info(f"Parakeet: steered {hits} steps away from Cyrillic/Greek")
 
 
 def _log_word(word, cost, kept):

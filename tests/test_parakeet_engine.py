@@ -176,3 +176,126 @@ def test_the_log_says_your_words_steered_parakeet_but_not_which_word(caplog):
     logged = " ".join(r.message for r in caplog.records)
     assert "one of your words" in logged
     assert "ClaudeClaw" not in logged
+
+
+# --- Latin only on the processor (script_filter.py) ---------------------------
+
+# Pieces in onnx-asr's form; 5 is a Cyrillic "Ол" that Parakeet sometimes
+# prefers to " also" on a short, distorted chunk.
+LATIN_VOCAB = {0: " T", 1: "uck", 2: "ux", 3: " talk", 4: "Talk", 5: " Ол", 6: " also",
+               7: "<unk>", 8: "<blk>"}
+LATIN_BLANK = 8
+
+
+class ScriptedAsr:
+    """Stands in for onnx-asr's NemoConformerTdt: _decode scores the pieces
+    *script(t, tokens)* names (everything else -20, the blank 0), and the
+    TDT step is always one frame, as the duration head would say."""
+    use_low_precision = False
+    _blank_idx = LATIN_BLANK
+    _max_tokens_per_step = 10
+    _vocab = LATIN_VOCAB
+    _vocab_size = len(LATIN_VOCAB)
+
+    def __init__(self, script):
+        self.script = script
+
+    def _create_state(self):
+        return ()
+
+    def _decode(self, tokens, state, enc):
+        logits = np.full(len(LATIN_VOCAB), -20.0, dtype=np.float32)
+        logits[LATIN_BLANK] = 0.0
+        for pid, score in self.script(int(enc[0]), tokens).items():
+            logits[pid] = score
+        return logits, 1, (tuple(tokens),)
+
+
+def tuck_talk_also(t, tokens):
+    """Speech heard as "Tuck talk" (TuxTalk two points behind) and then a
+    word whose favourite is the Cyrillic piece, " also" one point behind."""
+    last = LATIN_VOCAB[tokens[-1]] if tokens else None
+    if t == 0:
+        return {0: 5}
+    if t == 1 and last == " T":
+        return {1: 5, 2: 3}
+    if t == 2 and last in ("uck", "ux"):
+        return {3: 5, 4: 3}
+    if t == 3:
+        return {5: 6, 6: 5}
+    return {}
+
+
+def _latin_model(asr):
+    from tuxtalk import parakeet_engine
+    model = parakeet_engine.ParakeetModel.__new__(parakeet_engine.ParakeetModel)
+    model._model = SimpleNamespace(asr=asr)
+    return model
+
+
+def _plain_decode(asr, frames=5):
+    """onnx-asr's own greedy decoder on *asr*, as recognize() would run it."""
+    from onnx_asr.asr import _AsrWithTransducerDecoding
+    enc = np.arange(frames, dtype=np.float32).reshape(1, frames, 1)
+    tokens, _ts, _lp = next(_AsrWithTransducerDecoding._decoding(asr, enc, np.array([frames])))
+    return "".join(LATIN_VOCAB[i] for i in tokens).strip()
+
+
+def test_latin_only_keeps_cyrillic_out_of_a_transcription():
+    asr = ScriptedAsr(tuck_talk_also)
+    assert _plain_decode(asr) == "Tuck talk Ол"
+    _latin_model(asr).set_latin_only(True)
+    assert _plain_decode(asr) == "Tuck talk also"
+
+
+def test_latin_only_works_with_your_words():
+    from tuxtalk import parakeet_bias
+    asr = ScriptedAsr(tuck_talk_also)
+    model = _latin_model(asr)
+    model.set_latin_only(True)
+    booster = parakeet_bias.WordBooster(LATIN_VOCAB, ["TuxTalk"], LATIN_BLANK)
+    decode = parakeet_bias.boosted_tdt_decoding(asr, booster)
+    enc = np.arange(5, dtype=np.float32).reshape(1, 5, 1)
+    tokens, _ts, _lp = next(decode(enc, np.array([5])))
+    assert "".join(LATIN_VOCAB[i] for i in tokens).strip() == "TuxTalk also"
+
+
+def test_latin_only_off_gives_parakeet_its_own_decoder_back():
+    asr = ScriptedAsr(tuck_talk_also)
+    model = _latin_model(asr)
+    model.set_latin_only(True)
+    model.set_latin_only(False)
+    assert "_decode" not in vars(asr)
+    assert _plain_decode(asr) == "Tuck talk Ол"
+
+
+def test_latin_only_asked_again_changes_nothing():
+    asr = ScriptedAsr(tuck_talk_also)
+    model = _latin_model(asr)
+    model.set_latin_only(True)
+    wrapped = asr._decode
+    model.set_latin_only(True)
+    assert asr._decode is wrapped
+
+
+def test_latin_only_on_an_unexpected_onnx_asr_still_dictates():
+    """A future onnx-asr without these internals must not break dictation."""
+    class Odd:
+        pass
+    asr = Odd()
+    _latin_model(asr).set_latin_only(True)
+    assert "_decode" not in vars(asr)
+
+
+def test_the_log_counts_the_steering_but_shows_no_text(caplog):
+    import logging
+    from tuxtalk import parakeet_engine
+    asr = ScriptedAsr(tuck_talk_also)
+    model = _latin_model(asr)
+    model._model.recognize = lambda audio, sample_rate: _plain_decode(asr)
+    model.set_latin_only(True)
+    caplog.set_level(logging.INFO, logger=parakeet_engine.logger.name)
+    assert model.recognize(np.zeros(16000, dtype=np.float32)) == "Tuck talk also"
+    logged = [r.message for r in caplog.records if "steered" in r.message]
+    assert logged == ["Parakeet: steered 1 steps away from Cyrillic/Greek"]
+    assert "also" not in " ".join(logged)
